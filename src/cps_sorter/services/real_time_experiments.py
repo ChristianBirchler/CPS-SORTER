@@ -47,6 +47,8 @@ class RealTimeExperimentRunner:
         self.test_dir = os.mkdir(os.path.join(self.temp_dir.name, 'test_files'))
         self.weka_helper = weka_helper
         self.road_transformer = RoadTransformer()
+
+        # NOTE: Used for execute a test case in BeamNG
         self.runner_factory = gen_beamng_runner_factory(config.ex.get_level_dir(), config.ex.host, config.ex.port, plot=False)
 
     def run_experiment(self, time_budget, weka_model, bulk_size=10, init_data='', adaptive=True):
@@ -71,6 +73,8 @@ class RealTimeExperimentRunner:
                 'init_data': init_data
             }
         }
+
+        # start time measurement
         init_start_time = datetime.datetime.now()
         self.log_file = open('{}/log_file.txt'.format(self.output_dir), 'w')
         counter = 0
@@ -79,6 +83,9 @@ class RealTimeExperimentRunner:
         start_time = datetime.datetime.now()
         self.log_file.write('Start Time: {} \n'.format(start_time))
         print('Start time: {}'.format(start_time))
+        
+        
+        # Distinguish if data is provided
         if not init_data:
             self.training_file = '{}/trainings_file.csv'.format(self.output_dir)
             init_tests = self.generate_init_data(3*bulk_size, test_factory)
@@ -88,13 +95,24 @@ class RealTimeExperimentRunner:
                     out.write(json.dumps(RoadTest.to_dict(test), sort_keys=True, indent=4))
                 counter += 1
             results['init_data_time'] += (datetime.datetime.now() - init_start_time).total_seconds()
+
+            # build and train an initial model (Logistic regression)
             self.weka_helper.build_models(self.training_file, self.output_dir, [weka_model])
+        
         else:
             self.training_file = init_data
+
+            # build and train an initial model (Logistic regression)
             self.weka_helper.build_models(self.training_file, self.output_dir, [weka_model])
 
+        
+        
+        # end time measurement
         end_time = datetime.datetime.now() + datetime.timedelta(minutes=time_budget)
         
+
+
+        # do as long the time budget is not reached
         while datetime.datetime.now() < end_time:
             round = {
                 'num_safe_pred': 0,
@@ -105,63 +123,104 @@ class RealTimeExperimentRunner:
                 'true_positive': 0,
             }
             new_tests = []
+
+            # create only 20 tests?
             while len(new_tests) < 20:
                 if datetime.datetime.now() > end_time:
                         break
                 start_generating = datetime.datetime.now()
+
+                # generate the test cases (bulk_size=10)
                 to_predict, test_cases = self.generate_test_cases(test_factory, bulk_size)
+
                 end_time_generating = datetime.datetime.now()
                 results['time_test_generation'] += (end_time_generating - start_generating).total_seconds()
+
+                # do predections
                 predictions = self.weka_helper.make_bulk_predictions(weka_model, to_predict, bulk_size)
                 end_prediction = datetime.datetime.now()
                 results['time_predictions'] += (end_prediction - end_time_generating).total_seconds()
                 results['generated_tests'] += bulk_size
+
+                # iterate over all predictions (with a counter 'c') (bulk_size=10)
                 for c, prediction in enumerate(predictions):
+
+                    # check if we reached the timeout
                     if datetime.datetime.now() > end_time:
                         break
+
+                    # test case was predicted as 'UNSAFE' --> out of bound periods of the vehicle
+                    # we run the tests in the simulator which were predicted as 'UNSAFE'
                     if prediction == 'unsafe':
                         results['tested_files'] += 1
                         round['num_unsafe_pred'] += 1
+
+                        # executed the test with the simulator in order to get the real label (safe, unsafe)
                         test_cases[c].execution = self.run_test(test_cases[c])
                         new_tests.append(test_cases[c])
                         results['time_test_run'] += (test_cases[c].execution.end_time - test_cases[c].execution.start_time).total_seconds()
                         res = self.evaluate_test_case(test_cases[c])
+
+                        # test test passed in simulator
                         if res == 'safe':
                             round['num_safe'] += 1
                             round['false_positive'] += 1
                             results['safe_cases'] += 1
                             results['time_safe_test_run'] += (test_cases[c].execution.end_time - test_cases[c].execution.start_time).total_seconds()
                             self.log_file.write('{}: Mistaken Safe Test Case for Unsafe num: {} \n'.format(datetime.datetime.now(), results['safe_cases']))
+                        
+                        # test failed in the simulator
                         elif res == 'unsafe':
                             round['num_unsafe'] += 1
                             round['true_positive'] += 1
                             results['unsafe_cases'] += 1
                             results['time_unsafe_test_run'] += (test_cases[c].execution.end_time - test_cases[c].execution.start_time).total_seconds()
                             self.log_file.write('{}: Found Unsafe Test Case num: {} \n'.format(datetime.datetime.now(), results['unsafe_cases']))
+                        
                         results['time_test_evaluation'] = (end_prediction - end_time_generating).total_seconds()
                         print('Generated: {} files'.format(results['tested_files']))
+                    
+                    
+                    # test case was predicted as 'SAFE'
                     else:
                         results['predicated_as_safe'] += 1
                         round['num_safe_pred'] += 1
+
+
+                    # write data log    
                     end_evaluation = datetime.datetime.now()
                     results['time_test_evaluation'] = (end_evaluation-end_prediction).total_seconds()
                     with open('{}/test_{}.json'.format(self.output_dir, counter), 'w') as out:
                         out.write(json.dumps(RoadTest.to_dict(test_cases[c]), sort_keys=True, indent=4))
                     counter += 1
                     results['time_test_persisting_rejected'] = (datetime.datetime.now()-end_evaluation).total_seconds()
+                    
+                    
+                    # print temporary results after each 10th iteration
                     if counter % 10 ==0:
                         elapsed_time = datetime.datetime.now() - start_time
                         print("::::::::::::Elapsed Time::::::::: {}".format(str(datetime.timedelta(seconds=elapsed_time.total_seconds()))))
                         print("Tempresult: {}".format(results))
+            
+            
+            
+            # in case of the 'ADAPTIVE' model approach
             if adaptive:
                 start_building_time = datetime.datetime.now()
+
+                # NOTE: len(new_tests) <= bulk_size
                 self.road_transformer.transform_tests_to_training_data(new_tests, self.training_file, False)
+
+                # adapt/retrain model
                 self.weka_helper.rebuild_models(self.training_file, self.output_dir, [weka_model])
+
                 results['building_model'] += (datetime.datetime.now() - start_building_time).total_seconds()
+                
             round['unsafe_precision'] =  round['true_positive'] / round['num_unsafe_pred']
             rounds.append(round)
             print("Round: {}".format(round))
             self.log_file.write('{}: Testprediction: {} \n'.format(datetime.datetime.now(), round['true_positive']/round['num_unsafe_pred']))
+        
         results['rounds'] = rounds
         return results
 

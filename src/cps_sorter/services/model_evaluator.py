@@ -4,11 +4,14 @@ import os
 import csv
 from cps_sorter.services.road_transformer import RoadTransformer
 from cps_sorter.services.weka_helper import WekaHelper
+
+
 class ModelEvaluator():
     def __init__(self, output_folder):
         self.output_folder = output_folder
         self.road_transformer = RoadTransformer()
         self.weka_helper = WekaHelper()
+
 
     def create_dataset(self, data_location, dataset_name, featureset):
         dataset = []
@@ -19,23 +22,36 @@ class ModelEvaluator():
                     test = json.load(json_file)
                     if not 'execution' in test.keys():
                             continue
+
+                    # test based on 'FULLROAD' features
                     if featureset == 'fullroad':
                         features = self.road_transformer.extract_features(test)
+
+                        # label test as 'SAFE' or 'UNSAFE' based on 'out of bounds sequences' (OOBS)
                         if test['execution']['oobs'] > 0:
                             features['safety'] = 'unsafe'
                         else:
                             features['safety'] = 'safe'
+
+                        # add test to dataset
                         dataset.append(features)
+                    
+                    # test based on 'ROADSEGMENT' features
+                    # TODO: where are the label assignments?
                     elif featureset == 'roadsegment':
+                        # add test to dataset
                         dataset.extend(self.road_transformer.extract_segment_features_rows(test))
                     print('file {}'.format(i))
                     i += 1
 
+            # exception while file handling
             except Exception as e:
                 print('test file {}: {}'.format(test_file, e))
                 continue
         self._write_data_file('{}/{}_Complete.csv'.format(self.output_folder, dataset_name), dataset, featureset=featureset)
         return dataset
+
+
 
     def create_trainig_and_test_set(self, ratio, dataset_name, featureset='fullroad'):
         num_sample = int(len(self.complete_dataset)*ratio)
@@ -45,13 +61,19 @@ class ModelEvaluator():
 
 
     def rebalancing(self, training_set, ratio):
+    # NOTE: 'training_set' refers actually to the whole data set
         safe = []
         unsafe = []
+
+        # separate 'SAFE' and 'UNSAFE' test scenarios
         for item in self.complete_dataset:
             if item['safety'] == 'safe':
                 safe.append(item)
             else:
                 unsafe.append(item)
+
+        # Ensure we have for both classes the same 'ratio' proportion of test cases
+        # If there are more 'UNSAFE' tests
         if len(safe) < len(unsafe):
             num_safe_sample = int(ratio *len(safe))
             num_unsafe_sample = int(ratio *len(unsafe))
@@ -59,6 +81,8 @@ class ModelEvaluator():
             random.shuffle(unsafe)
             training_set = safe[:num_safe_sample] + unsafe[:num_safe_sample]
             test_set = safe[num_safe_sample:] + unsafe[num_unsafe_sample:]
+
+        # If there are more 'SAFE' tests
         else:
             num_safe_sample = int(ratio *len(safe))
             num_unsafe_sample = int(ratio *len(unsafe))
@@ -105,7 +129,11 @@ class ModelEvaluator():
             writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
             writer.writeheader()
         self.complete_dataset = self.create_dataset(data_location, dataset_name, featureset)
+
+        # evaluate models with different split ratios
         for ratio in ratios:
             self.create_trainig_and_test_set(ratio, dataset_name, featureset)
+
+            # 'ratio' is used as dataset name!
             self.weka_helper.evaluate_models(str(ratio), self.trainings_file, self.test_file, result_file)
         return '{}_result'.format(dataset_name)
