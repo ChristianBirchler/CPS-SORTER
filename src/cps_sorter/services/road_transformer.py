@@ -8,6 +8,7 @@ import os
 from asfault.tests import RoadTest
 import random
 from scipy.spatial.distance import directed_hausdorff
+import datetime
 
 
 class Point:
@@ -112,6 +113,12 @@ class RoadTransformer:
         except Exception as e:
                 print(e)
 
+
+    def __calc_duration(self, start_time, end_time):
+        t1 = datetime.datetime.fromisoformat(start_time)
+        t2 = datetime.datetime.fromisoformat(end_time)
+        return (t2-t1).total_seconds()
+
     def extract_features(self, data):
         angles = []
         path = data['path']
@@ -123,6 +130,9 @@ class RoadTransformer:
         r_turns = 0
         straight = 0
         road_distance = 0
+        start_time = data['execution']['start_time']
+        end_time = data['execution']['end_time']
+        duration = self.__calc_duration(start_time, end_time)
 
         for seg_id in path:
             seg = data['network']['nodes'][str(seg_id)]
@@ -172,6 +182,9 @@ class RoadTransformer:
             'std_pivot_off': np.std(pivot_offs),
             'max_pivot_off': np.max(pivot_offs),
             'min_pivot_off': np.min(pivot_offs),
+            'start_time': start_time,
+            'end_time': end_time,
+            'duration_seconds': duration,
         }
     
 
